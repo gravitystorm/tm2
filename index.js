@@ -30,6 +30,7 @@ var mapnik_omnivore = require('mapnik-omnivore');
 var printer = require('abaculus');
 var sm = require('sphericalmercator');
 var polyline = require('polyline');
+var async = require('queue-async');
 
 var config = require('minimist')(process.argv.slice(2));
 config.db = config.db || path.join(process.env.HOME, '.tilemill', 'v2', 'app.db');
@@ -120,43 +121,41 @@ app.get('/static/:z/:w,:s,:e,:n:scale(@\\d+x).:format([\\w\\.]+)', middleware.st
 
 app.get('/source/:z,:lon,:lat.json', middleware.source, cors(), inspect);
 
-app.get('/testelev/:z,:lon,:lat.json', middleware.source, cors(), findElevation);
-
 app.get('/contours/:z,:lon,:lat.json', middleware.source, cors(), getContours);
 
 app.get('/poly/:poly,:density.json', middleware.source, cors(), decodePoly);
 
+app.get('/poly1/:poly,:density.json', middleware.source, cors(), decodePolyAsync);
+
 app.get('/style/:z,:lon,:lat.json', middleware.style, cors(), inspect);
 
 
-function decodePoly(req,res,next) {
-
+function decodePolyAsync(req,res,next) {
+    var z = 14;
     var startTime = new Date();
     var decodedPoly = polyline.decode(req.params.poly);
     var density = parseInt(req.params.density, 10);
     var tolerance = 1;
-    var returnData = [];
     var qCounter = 0;
-    //return res.json({pts:decodedPoly,density:density});
-    function queryDone() {
-        if (returnData.length == decodedPoly.length) {
-            return res.json({output:returnData,responseTime:new Date()-startTime});
-        }
-        else {
-            getElev(z,decodedPoly[qCounter])
-        }
+    var queryTime = 0;
+    var queue = new async();
+
+    function queryDone(err,resp) {
+        return res.json({output:resp,responseTime:new Date()-startTime,queryTime:queryTime});
     }
-    function getElev(z,lonlat) {
+
+    function getElev(z,lonlat,id,callback) {
         var lon = lonlat[1];
         var lat = lonlat[0];
+        var startQuery = new Date();
 
         req.style.queryTile(z, lon, lat, { layer: 'contour', tolerance:tolerance }, function(err, data, headers) {
+            queryTime += new Date()-startQuery;
             if (err) {
                 console.error(err);
                 return next(err);
             }
             //res.set(headers);
-
             data.sort(function(a, b) {
                 var ad = a.distance || 0;
                 var bd = b.distance || 0;
@@ -165,45 +164,122 @@ function decodePoly(req,res,next) {
 
             if (data.length<1){
                 var elevationOutput = {
-                    distance: -999,//conData[1].distance,
+                    distance: -999,
                     lat: lat,
                     lon: lon,
-                    elevation: -999,
-                    tolerance: tolerance
+                    elevation: 0
                 }
             }
 
             else if (data.length==1){
                 var elevationOutput = {
-                    distance: data[0].distance,//conData[1].distance,
+                    distance: data[0].distance,
                     lat: lat,
                     lon: lon,
-                    elevation: data[0].attributes.ele,
-                    tolerance: tolerance
+                    elevation: data[0].attributes.ele
                 }
             }
+
             else {
                 var distRatio = data[1].distance/(data[0].distance+data[1].distance);
                 var heightDiff = (data[0].attributes.ele-data[1].attributes.ele);
                 var calcEle = data[1].attributes.ele+heightDiff*distRatio;
 
                 var elevationOutput = {
-                    distance: (data[0].distance+data[1].distance)/2,//conData[1].distance,
+                    distance: (data[0].distance+data[1].distance)/2,
                     lat: lat,
                     lon: lon,
                     elevation: calcEle,
-                    tolerance: tolerance
+                    id: id
+                }
+            }
+            qCounter+=1;
+            callback(null, elevationOutput);
+        });
+    }
+
+    for (var i = 0; i<decodedPoly.length; i++) {
+        queue.defer(getElev,z,decodedPoly[i],i);
+    }
+
+    queue.awaitAll(queryDone);
+}
+
+
+function decodePoly(req,res,next) {
+    var z = 14;
+    var startTime = new Date();
+    var decodedPoly = polyline.decode(req.params.poly);
+    var density = parseInt(req.params.density, 10);
+    var tolerance = 1;
+    var returnData = [];
+    var qCounter = 0;
+    var queryTime = 0;
+
+    function queryDone() {
+        if (returnData.length >= decodedPoly.length) {
+            return res.json({output:returnData,responseTime:new Date()-startTime,queryTime:queryTime});
+        }
+        else {
+            getElev(z,decodedPoly[qCounter])
+        }
+    }
+
+    function getElev(z,lonlat) {
+        var lon = lonlat[1];
+        var lat = lonlat[0];
+        var startQuery = new Date();
+
+        req.style.queryTile(z, lon, lat, { layer: 'contour', tolerance:tolerance }, function(err, data, headers) {
+            queryTime += new Date()-startQuery;
+            if (err) {
+                console.error(err);
+                return next(err);
+            }
+            res.set(headers);
+            data.sort(function(a, b) {
+                var ad = a.distance || 0;
+                var bd = b.distance || 0;
+                return ad < bd ? -1 : ad > bd ? 1 : 0;
+            });
+
+            if (data.length<1){
+                var elevationOutput = {
+                    distance: -999,
+                    lat: lat,
+                    lon: lon,
+                    elevation: 0
+                }
+            }
+
+            else if (data.length==1){
+                var elevationOutput = {
+                    distance: data[0].distance,
+                    lat: lat,
+                    lon: lon,
+                    elevation: data[0].attributes.ele
+                }
+            }
+
+            else {
+                var distRatio = data[1].distance/(data[0].distance+data[1].distance);
+                var heightDiff = (data[0].attributes.ele-data[1].attributes.ele);
+                var calcEle = data[1].attributes.ele+heightDiff*distRatio;
+
+                var elevationOutput = {
+                    distance: (data[0].distance+data[1].distance)/2,
+                    lat: lat,
+                    lon: lon,
+                    elevation: calcEle
                 }
             }
             qCounter+=1;
             returnData.push(elevationOutput);
             queryDone();
-            //return res.json({out:elevationOutput});
-
             
         });
     }
-    var z = 14;
+    
     getElev(z,decodedPoly[qCounter]);
 }
 
@@ -217,6 +293,7 @@ function getContours(req,res,next) {
     var dists = [];
     var xyz = merc.xyz([lon,lat,lon,lat],z);
     var bbox = merc.bbox(xyz.minX, xyz.minY,z)
+
     var extentJSON = {
         features: [
             {
@@ -242,8 +319,7 @@ function getContours(req,res,next) {
         try {
             var outJSON = vtile.toGeoJSON('contour') || { type: 'FeatureCollection', features: [], name: 'contour' };
             extentJSON.features[0].properties.contours = outJSON.features.length;
-        }
-        catch(e) {
+        } catch(e) {
             extentJSON.features[0].properties.contours = 0;
             var outJSON = {}
         }
@@ -255,141 +331,6 @@ function getContours(req,res,next) {
 
 }
 
-
-function findElevation(req,res,next){
-
-    var lon = parseFloat(req.params.lon);
-    var lat = parseFloat(req.params.lat);
-    var z = parseInt(req.params.z, 10);
-
-    var tolerance = 1000;
-
-    req.style.queryTile(z, lon, lat, { layer: 'contour', tolerance:tolerance }, function(err, data, headers) {
-        if (err) return next(err);
-        res.set(headers);
-
-        data.sort(function(a, b) {
-            var ad = a.distance || 0;
-            var bd = b.distance || 0;
-            return ad < bd ? -1 : ad > bd ? 1 : 0;
-        });
-
-        if (data.length<1){
-            var elevationOutput = {
-                distance: -999,//conData[1].distance,
-                lat: lat,
-                lon: lon,
-                elevation: -999,
-                tolerance: tolerance
-            }
-
-        }
-
-        else {
-            try{
-                var elevationOutput = {
-                    distance: data[0].distance,//conData[1].distance,
-                    lat: lat,
-                    lon: lon,
-                    elevation: data[0].attributes.ele,
-                    tolerance: tolerance
-                }
-            }
-            catch(err) {
-                var elevationOutput = {
-                    distanceBetween: -999,
-                    lat: lat,
-                    lon: lon,
-                    elevation: -999
-                }
-            }
-        }
-        return res.json({out:elevationOutput});
-
-        
-    });
-}
-function testElevation(req,res,next) {
-    var startTime = new Date();
-    var lon = parseFloat(req.params.lon);
-    var lat = parseFloat(req.params.lat);
-    var z = parseInt(req.params.z, 10);
-    var xOff = 0;
-    var yOff = 0;
-
-    var tolerance = 6500;
-
-    var merc = new sm();
-    var xyz = merc.xyz([lon,lat,lon,lat],z);
-    
-
-    req.style._backend.getTile(z, xyz.minX, xyz.minY, function(err, vtile, headers) {
-        if (err) return next(err);
-
-        var outJson = vtile.toGeoJSON("contour");
-        console.log("PREFIX: "+lon+" "+lat);
-        if (outJson.features.length == 0) {
-            var tbox = merc.bbox(xyz.minX, xyz.minY,z);
-            var ctr = {};
-            ctr.lon = (tbox[0]+tbox[2])/2+tbox[2];
-            ctr.lat = (tbox[1]+tbox[3])/2+tbox[3];
-            var xOff,
-                yOff;
-            if (lon<ctr.lon && lat < ctr.lat) {
-                var xOff = -1;
-                var yOff = -1;
-                var newbox = merc.bbox(xyz.minX-1, xyz.minY-1,z);
-                lon = newbox[2];
-                lat = newbox[3];
-            }
-            else if (lon<ctr.lon && lat > ctr.lat) {
-                var xOff = -1;
-                var yOff = 1;
-                var newbox = merc.bbox(xyz.minX-1, xyz.minY+1,z);
-                lon = newbox[2];
-                lat = newbox[1];
-            }
-            else if (lon>ctr.lon && lat < ctr.lat) {
-                var xOff = 1;
-                var yOff = -1;
-                var newbox = merc.bbox(xyz.minX+1, xyz.minY-1,z);
-                lon = newbox[0];
-                lat = newbox[3];
-            }
-            else {
-                var xOff = 1;
-                var yOff = 1;
-                var newbox = merc.bbox(xyz.minX+1, xyz.minY+1,z);
-                lon = newbox[0];
-                lat = newbox[1];
-            }
-            console.log("FIX: "+lon+" "+lat);
-
-        }
-
-        req.style.queryTile(z, lon, lat, { layer: 'contour', tolerance:tolerance }, function(err, data, headers) {
-            if (err) return next(err);
-            res.set(headers);
-            console.log("ff:"+xOff);
-            data.sort(function(a, b) {
-                var ad = a.distance || 0;
-                var bd = b.distance || 0;
-                return ad < bd ? -1 : ad > bd ? 1 : 0;
-            });
-
-            var elevationOutput = {
-                distance: data[0].distance,//conData[1].distance,
-                lat: lat,
-                lon: lon,
-                elevation: data[0].attributes.ele,
-                tolerance: tolerance
-            }
-
-            return res.json({out:elevationOutput,data:outJson});
-
-        }); 
-    });
-}
 
 function inspect(req, res, next) {
     var lon = parseFloat(req.params.lon);
