@@ -28,7 +28,8 @@ var request = require('request');
 var crypto = require('crypto');
 var mapnik_omnivore = require('mapnik-omnivore');
 var printer = require('abaculus');
-var sm = require('sphericalmercator');
+var sm = new (require('sphericalmercator'))();
+
 var polyline = require('polyline');
 var async = require('queue-async');
 
@@ -138,36 +139,49 @@ function decodePolyAsync(req,res,next) {
     var tolerance = 1;
     var qCounter = 0;
     var queryTime = 0;
+    var tilesLoaded = [];
     var queue = new async();
 
     function queryDone(err,resp) {
-        return res.json({output:resp,responseTime:new Date()-startTime,queryTime:queryTime});
+        return res.json({output:resp,responseTime:new Date()-startTime,queryTime:queryTime,tilesLoaded:tilesLoaded.length});
     }
 
     function getElev(z,lonlat,id,callback) {
+        
         var lon = lonlat[1];
         var lat = lonlat[0];
-        var startQuery = new Date();
 
-        req.style.queryTile(z, lon, lat, { layer: 'contour', tolerance:tolerance }, function(err, data, headers) {
-            queryTime += new Date()-startQuery;
-            if (err) {
-                console.error(err);
-                return next(err);
+        var xyz = sm.xyz([lon, lat, lon, lat], z);
+        var tileName = ''+z+','+xyz.minX+','+xyz.minY;
+        var newTileLoaded = 0
+        if (tilesLoaded.indexOf(tileName) == -1) {
+            tilesLoaded.push(tileName);
+            newTileLoaded = 1
+        }
+        var queryStart = new Date();
+        req.style._backend.getTile(z, xyz.minX, xyz.minY, function(err, vtile, head) {
+            var elapsedTime = new Date()-queryStart
+            var vtileStart = new Date();
+            if (err) return callback(err)
+            try {
+                var data = vtile.query(lon, lat, { layer: 'contour', tolerance:tolerance });
+            } catch(err) {
+                return callback(err);
             }
-            //res.set(headers);
+            var vtileTimeElapse = new Date()-vtileStart;
             data.sort(function(a, b) {
                 var ad = a.distance || 0;
                 var bd = b.distance || 0;
                 return ad < bd ? -1 : ad > bd ? 1 : 0;
             });
-
             if (data.length<1){
                 var elevationOutput = {
                     distance: -999,
                     lat: lat,
                     lon: lon,
-                    elevation: 0
+                    elevation: 0,
+                    time: elapsedTime,
+                    newTile: newTileLoaded
                 }
             }
 
@@ -176,24 +190,26 @@ function decodePolyAsync(req,res,next) {
                     distance: data[0].distance,
                     lat: lat,
                     lon: lon,
-                    elevation: data[0].attributes.ele
+                    elevation: data[0].attributes().ele,
+                    time: elapsedTime,
+                    newTile: newTileLoaded
                 }
             }
 
             else {
                 var distRatio = data[1].distance/(data[0].distance+data[1].distance);
-                var heightDiff = (data[0].attributes.ele-data[1].attributes.ele);
-                var calcEle = data[1].attributes.ele+heightDiff*distRatio;
+                var heightDiff = (data[0].attributes().ele-data[1].attributes().ele);
+                var calcEle = data[1].attributes().ele+heightDiff*distRatio;
 
                 var elevationOutput = {
                     distance: (data[0].distance+data[1].distance)/2,
                     lat: lat,
                     lon: lon,
                     elevation: calcEle,
-                    id: id
+                    time: elapsedTime,
+                    newTile: newTileLoaded
                 }
             }
-            qCounter+=1;
             callback(null, elevationOutput);
         });
     }
