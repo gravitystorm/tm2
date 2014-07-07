@@ -60,6 +60,12 @@
       <% if (obj.properties['group-by']) { %>
       <input type='hidden' name='properties-group-by' value='<%=obj.properties['group-by']%>' />
       <% } %>
+      <% if (obj.properties['minzoom']) { %>
+      <input type='hidden' name='properties-minzoom' value='<%=obj.properties['minzoom']%>' />
+      <% } %>
+      <% if (obj.properties['maxzoom']) { %>
+      <input type='hidden' name='properties-maxzoom' value='<%=obj.properties['maxzoom']%>' />
+      <% } %>
       <section class='pad2'>
         <a href='#' class='js-save quiet button submit margin6 col6'>Done</a>
       </section>
